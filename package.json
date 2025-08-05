@@ -1,0 +1,89 @@
+{
+  "name": "automarket-quito",
+  "version": "1.0.0",
+  "description": "Pipeline Aplicativo - E-commerce Vehicular para Quito",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "install:all": "npm install && npm install --prefix backend && npm install --prefix frontend",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build": "npm run build:backend && npm run build:frontend",
+    "build:backend": "npm run build --prefix backend",
+    "build:frontend": "npm run build --prefix frontend",
+    "test": "npm run test:backend && npm run test:frontend",
+    "test:backend": "npm test --prefix backend",
+    "test:frontend": "npm test --prefix frontend",
+    "test:all": "npm run test:unit && npm run test:integration && npm run test:e2e",
+    "test:unit": "npm run test:unit --prefix backend && npm run test:unit --prefix frontend",
+    "test:integration": "npm run test:integration --prefix backend",
+    "test:e2e": "npm run test:e2e --prefix e2e-tests",
+    "test:smoke": "npm run test:smoke --prefix e2e-tests",
+    "test:performance": "npm run test:performance --prefix e2e-tests",
+    "lint": "npm run lint --prefix backend && npm run lint --prefix frontend",
+    "format": "npm run format --prefix backend && npm run format --prefix frontend",
+    "format:check": "npm run format:check --prefix backend && npm run format:check --prefix frontend",
+    "migrate": "npm run migrate --prefix backend",
+    "migrate:rollback": "npm run migrate:rollback --prefix backend",
+    "migrate:status": "npm run migrate:status --prefix backend",
+    "seed": "npm run seed --prefix backend",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "docs:generate": "npm run docs:generate --prefix backend && npm run docs:generate --prefix frontend",
+    "security:check": "npm audit && npm audit --prefix backend && npm audit --prefix frontend",
+    "clean": "npm run clean --prefix backend && npm run clean --prefix frontend",
+    "prepare": "husky install"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^14.0.1",
+    "@commitlint/cli": "^17.7.1",
+    "@commitlint/config-conventional": "^17.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/automarket-quito.git"
+  },
+  "keywords": [
+    "ecommerce",
+    "vehicular",
+    "marketplace",
+    "quito",
+    "ecuador",
+    "pipeline",
+    "cicd"
+  ],
+  "author": "AutoMarket Quito Team",
+  "license": "MIT",
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml,yaml}": [
+      "prettier --write"
+    ]
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  },
+  "husky": {
+    "hooks": {
+      "pre-commit": "lint-staged",
+      "commit-msg": "commitlint -E HUSKY_GIT_PARAMS"
+    }
+  }
+}
