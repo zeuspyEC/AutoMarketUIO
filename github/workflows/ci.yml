@@ -1,0 +1,390 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop, staging ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  NODE_VERSION: '18'
+
+jobs:
+  # Job 1: Análisis de código y calidad
+  code-quality:
+    name: Code Quality & Linting
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Cache de dependencias
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.npm
+          node_modules
+          */*/node_modules
+        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-node-
+
+    - name: Instalar dependencias
+      run: |
+        npm ci --prefix backend
+        npm ci --prefix frontend
+
+    - name: Ejecutar ESLint
+      run: |
+        npm run lint --prefix backend
+        npm run lint --prefix frontend
+
+    - name: Verificar formato con Prettier
+      run: |
+        npm run format:check --prefix backend
+        npm run format:check --prefix frontend
+
+    - name: Análisis con SonarQube
+      uses: SonarSource/sonarcloud-github-action@master
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # Job 2: Build de las aplicaciones
+  build:
+    name: Build Applications
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Build Backend
+      run: |
+        cd backend
+        npm ci
+        npm run build
+        
+    - name: Build Frontend
+      run: |
+        cd frontend
+        npm ci
+        npm run build
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: build-artifacts
+        path: |
+          backend/dist
+          frontend/build
+
+  # Job 3: Testing
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    needs: build
+    
+    strategy:
+      matrix:
+        test-suite: [unit, integration, e2e]
+    
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: automarket_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+          
+      redis:
+        image: redis:6-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Download build artifacts
+      uses: actions/download-artifact@v3
+      with:
+        name: build-artifacts
+
+    - name: Instalar dependencias
+      run: |
+        npm ci --prefix backend
+        npm ci --prefix frontend
+
+    - name: Ejecutar migraciones de base de datos
+      run: |
+        cd backend
+        npm run migrate:test
+      env:
+        DATABASE_URL: postgresql://test:test@localhost:5432/automarket_test
+
+    - name: Ejecutar tests - ${{ matrix.test-suite }}
+      run: |
+        if [ "${{ matrix.test-suite }}" = "unit" ]; then
+          npm run test:unit --prefix backend -- --coverage
+          npm run test:unit --prefix frontend -- --coverage
+        elif [ "${{ matrix.test-suite }}" = "integration" ]; then
+          npm run test:integration --prefix backend
+        elif [ "${{ matrix.test-suite }}" = "e2e" ]; then
+          npm run cypress:ci --prefix frontend
+        fi
+      env:
+        DATABASE_URL: postgresql://test:test@localhost:5432/automarket_test
+        REDIS_URL: redis://localhost:6379
+        NODE_ENV: test
+
+    - name: Upload coverage reports
+      if: matrix.test-suite == 'unit'
+      uses: codecov/codecov-action@v3
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ./backend/coverage/lcov.info,./frontend/coverage/lcov.info
+
+  # Job 4: Análisis de seguridad
+  security:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Dependency audit
+      run: |
+        npm audit --prefix backend --audit-level=moderate
+        npm audit --prefix frontend --audit-level=moderate
+
+    - name: OWASP Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'AutoMarket-Quito'
+        path: '.'
+        format: 'HTML'
+
+  # Job 5: Build y push de imágenes Docker
+  docker:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name == 'push'
+    
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v2
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=sha
+
+    - name: Build and push Backend Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: ./backend
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}-backend
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build and push Frontend Docker image
+      uses: docker/build-push-action@v4
+      with:
+        context: ./frontend
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}-frontend
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Job 6: Deploy a diferentes ambientes
+  deploy:
+    name: Deploy to Environment
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push'
+    
+    strategy:
+      matrix:
+        environment:
+          - name: development
+            branch: develop
+            url: https://dev.automarket-quito.com
+          - name: staging
+            branch: staging
+            url: https://staging.automarket-quito.com
+          - name: production
+            branch: main
+            url: https://automarket-quito.com
+    
+    environment:
+      name: ${{ matrix.environment.name }}
+      url: ${{ matrix.environment.url }}
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+      if: github.ref == format('refs/heads/{0}', matrix.environment.branch)
+
+    - name: Deploy to Kubernetes
+      if: github.ref == format('refs/heads/{0}', matrix.environment.branch)
+      run: |
+        echo "Deploying to ${{ matrix.environment.name }} environment"
+        # Aquí iría el deployment real con kubectl o helm
+        # kubectl apply -f k8s/overlays/${{ matrix.environment.name }}
+        # helm upgrade --install automarket ./charts/automarket \
+        #   --namespace ${{ matrix.environment.name }} \
+        #   --values ./charts/automarket/values-${{ matrix.environment.name }}.yaml
+
+    - name: Run smoke tests
+      if: github.ref == format('refs/heads/{0}', matrix.environment.branch)
+      run: |
+        echo "Running smoke tests on ${{ matrix.environment.url }}"
+        # npm run test:smoke -- --url=${{ matrix.environment.url }}
+
+    - name: Notify deployment status
+      if: always() && github.ref == format('refs/heads/{0}', matrix.environment.branch)
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        text: |
+          Deployment to ${{ matrix.environment.name }}: ${{ job.status }}
+          Branch: ${{ github.ref }}
+          Commit: ${{ github.sha }}
+          URL: ${{ matrix.environment.url }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+
+  # Job 7: Performance testing
+  performance:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.ref == 'refs/heads/staging'
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+
+    - name: Run k6 load tests
+      uses: k6io/action@v0.1
+      with:
+        filename: tests/performance/load-test.js
+        flags: --out json=results.json
+
+    - name: Upload performance results
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-results
+        path: results.json
+
+  # Job 8: Release
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [deploy, performance]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+    - name: Checkout código
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Generate changelog
+      id: changelog
+      uses: TriPSs/conventional-changelog-action@v3
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        output-file: 'CHANGELOG.md'
+
+    - name: Create Release
+      uses: actions/create-release@v1
+      if: ${{ steps.changelog.outputs.skipped == 'false' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.changelog.outputs.tag }}
+        release_name: ${{ steps.changelog.outputs.tag }}
+        body: ${{ steps.changelog.outputs.clean_changelog }}
+
+    - name: Update documentation
+      run: |
+        echo "Updating API documentation..."
+        # npm run docs:generate
+        # npm run docs:deploy
